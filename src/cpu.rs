@@ -73,6 +73,7 @@ struct Cpu {
     write_back_mask : u32,
 
     icache : Icache,
+    debug_rotate : usize,
 }
 
 impl Cpu {
@@ -95,7 +96,6 @@ impl Cpu {
         return self.read(addr, 0xf);
     }
     fn read(&self, addr:u32, select:u8) -> u32 {
-        unimplemented!();
         return 0;
     }
 
@@ -111,13 +111,18 @@ impl Cpu {
         self.write(addr, data, 0xf);
     }
     fn write(&self, addr:u32, data:u32, select:u8) {
-        println!("write {:08x} to {:08x} with {:04b}", data, addr, select);
     }
 
     fn run_pipeline_cycle(&mut self) {
-        let mut debug = [""; 5];
+        // This function runs each of the 5 stages.
+        // In hardware all the stages would be run in parallel, but in software
+        // we run the stages sequenctally in reverse order.
 
-        // Write Back
+
+        let mut debug = ["".to_string(), "".to_string(), "".to_string(), "".to_string(), "".to_string()];
+
+        // Write Back Stage
+        // =========================================================
         if self.dest_3 != 0 {
             if self.write_back_mask == 0xf {
                 self.regs[self.dest_3] = self.mem_result;
@@ -134,11 +139,12 @@ impl Cpu {
                     _ => unreachable!()
                 };
             }
-            println!("r{:} = {:08x}", self.dest_3, self.regs[self.dest_3]);
+            debug[4] = format!("                 --> r{:}", self.dest_3);
         }
 
 
-        // Memory
+        // Memory Stage
+        // ======================================================
         // The address was calculated in the last cycle.
         self.write_back_mask = 0xf;
 
@@ -161,9 +167,19 @@ impl Cpu {
             MemMode::SWR => { self.write(self.alu_result & 0xfffffffc, self.store_data_2, 0xf >> (self.alu_result & 3)); 0},
         };
 
+        debug[3] = match self.mem_mode_2 {
+            MemMode::NOP if self.dest_2 == 0 => format!(""), 
+            MemMode::NOP => format!("              = {:08x}", self.alu_result),
+            MemMode::SB | MemMode::SH | MemMode::SW | MemMode::SWL | MemMode::SWR
+              => format!(" Store {:08x}", self.alu_result & 0xfffffffc),
+            _ => format!(" Load  {:08x}", self.alu_result & 0xfffffffc),
+        };
+
         self.dest_3 = self.dest_2;
 
-        // ALU
+
+        // ALU Stage
+        // ===============================================
         self.alu_result = match self.alu_mode {
             ALU::ADD  => self.data_a + self.data_b, // TODO: trap on overflow
             ALU::ADDU => self.data_a.wrapping_add(self.data_b),
@@ -181,8 +197,26 @@ impl Cpu {
         };
         self.dest_2 = self.dest;
 
+        debug[2] = match self.alu_mode {
+            ALU::ADD | ALU::ADDU => format!(" {:x} + {:x} ", self.data_a, self.data_b),
+            ALU::SUB | ALU::SUBU => format!(" {:x} - {:x} ", self.data_a, self.data_b),
+            ALU::AND => format!(" {:x} & {:x} ", self.data_a, self.data_b),
+            ALU::OR  => format!(" {:x} | {:x} ", self.data_a, self.data_b),
+            ALU::XOR => format!(" {:x} ^ {:x} ", self.data_a, self.data_b),
+            ALU::NOR => format!(" ~({:x} | {:x})", self.data_a, self.data_b),
+            ALU::SLL => format!(" {:x} << {:}", self.data_a, self.data_b),
+            ALU::SRL => format!(" {:x} >> {:}", self.data_a, self.data_b),
+            ALU::SRA => format!(" {:x} >>> {:}", self.data_a, self.data_b),
+            ALU::SLT | ALU::SLTU => format!(" {:>8x} < {:>8x}", self.data_a, self.data_b),
+        };
+
+        match self.mem_mode {  // Hide nop alu operations
+            MemMode::NOP if self.dest == 0 => { debug[2] = "".to_string(); },
+            _ => {}
+        };
+
         if self.do_branch {
-            println!("branch to {:x}", self.alu_result);
+            debug[2] = format!(" branch to {:08x}", self.alu_result);
             let old_pc = self.pc;
             self.pc = self.alu_result;
             self.do_branch = false;
@@ -197,7 +231,8 @@ impl Cpu {
         self.mem_mode = MemMode::NOP;
 
 
-        // Read Register (Mostly instruction decoding)
+        // Read Stage (instruction decoding)
+        // =============================================
         let opcode = self.fetched_instruction >> 26;
         let rs = (self.fetched_instruction >> 21) & 0x1f;
         let rt = (self.fetched_instruction >> 16) & 0x1f;
@@ -206,7 +241,7 @@ impl Cpu {
         let imm16 = self.fetched_instruction & 0xffff;
         let imm26 = self.fetched_instruction & 0x3ffffff;
 
-        println!("opcode: {:x} {:x}", opcode, self.fetched_instruction);
+        debug[1] = format!(" opcode: {:x}", self.fetched_instruction);
         match opcode {
             0x0 => {
                 let subop = self.fetched_instruction & 0x3f;
@@ -347,9 +382,19 @@ impl Cpu {
             _ => { panic!("Unimplemented Opcode") }
         }
 
-        // Instruction Fetch
+
+        // Instruction Fetch Stage
+        // =============================================
+        debug[0] = format!(" fetch {:08x}", self.pc);
         self.fetched_instruction = self.icache.read(self.pc); // TODO: takes 1 cycle to generate a result
         self.pc = self.pc + 4;
+
+        println!("{:25}|{:25}|{:25}|{:25}|{:25}", debug[(self.debug_rotate + 4) % 5 as usize], 
+                                                  debug[(self.debug_rotate + 3) % 5], 
+                                                  debug[(self.debug_rotate + 2) % 5], 
+                                                  debug[(self.debug_rotate + 1) % 5], 
+                                                  debug[(self.debug_rotate + 0) % 5]);
+        self.debug_rotate = (self.debug_rotate + 1) % 5;
     }
 
     pub fn run(&mut self, cycles : u32) -> u32 {
@@ -383,6 +428,7 @@ impl Cpu {
             mem_mode_2 : MemMode::NOP,
             dest_3 : 0,
             icache : Icache {},
+            debug_rotate : 1,
         }
     }
 }
