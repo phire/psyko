@@ -53,23 +53,25 @@ struct Cpu {
     fetched_instruction : u32,
 
     // stage 2 result (Read Register)
-    data_a : u32,
-    data_b : u32,
-    store_data : u32,
-    dest : usize,
+    temp_a : u32,
+    temp_b : u32,
+    input_a : u32,
+    input_b : u32,
+    input_store : u32,
+    dest : u32,
     alu_mode : ALU,
     mem_mode : MemMode,
     do_branch : bool,
 
     // stage 3 result (ALU)
     alu_result : u32,
-    store_data_2 : u32,
-    dest_2 : usize,
+    store_data : u32,
+    dest_2 : u32,
     mem_mode_2 : MemMode,
 
     // stage 4 result (Memory)
     mem_result : u32,
-    dest_3 : usize,
+    dest_3 : u32,
     write_back_mask : u32,
 
     icache : Icache,
@@ -77,13 +79,6 @@ struct Cpu {
 }
 
 impl Cpu {
-    fn read_reg(&self, reg : u32) -> u32 {
-        if self.dest_2 == reg as usize && self.dest_2 != 0 {
-            return self.alu_result; // bypass network 
-        }
-        return self.regs[reg as usize]
-    }
-
     fn read8(&self, addr:u32) -> u32 {
         let shift = addr & 3;
         return self.read(addr & 0xffffffc, 0x1 << shift) >> (shift*8);
@@ -125,11 +120,11 @@ impl Cpu {
         // =========================================================
         if self.dest_3 != 0 {
             if self.write_back_mask == 0xf {
-                self.regs[self.dest_3] = self.mem_result;
+                self.regs[self.dest_3 as usize] = self.mem_result;
             } else { // Unaligned loads
-                let old = self.regs[self.dest_3];
+                let old = self.regs[self.dest_3 as usize];
                 // TODO: can we generate these masks with faster code than a switch table?
-                self.regs[self.dest_3] = match self.write_back_mask {
+                self.regs[self.dest_3 as usize] = match self.write_back_mask {
                     0x1 => old & 0xffffff00 | self.mem_result & 0x000000ff,
                     0x3 => old & 0xffff0000 | self.mem_result & 0x0000ffff,
                     0x7 => old & 0xff000000 | self.mem_result & 0x00ffffff,
@@ -160,18 +155,18 @@ impl Cpu {
             MemMode::LBU => self.read8(self.alu_result),
             MemMode::LHU => self.read16(self.alu_result),
             MemMode::LWR => { self.write_back_mask = 0xf >> (self.alu_result & 3); self.read32(self.alu_result) },
-            MemMode::SB => { self.write8(self.alu_result, self.store_data_2); 0 },
-            MemMode::SH => { self.write16(self.alu_result, self.store_data_2); 0 },
-            MemMode::SW => { self.write32(self.alu_result, self.store_data_2); 0},
-            MemMode::SWL => { self.write(self.alu_result & 0xfffffffc, self.store_data_2, (0x78 >> (self.alu_result & 3)) & 0xf); 0},
-            MemMode::SWR => { self.write(self.alu_result & 0xfffffffc, self.store_data_2, 0xf >> (self.alu_result & 3)); 0},
+            MemMode::SB => { self.write8(self.alu_result, self.store_data); 0 },
+            MemMode::SH => { self.write16(self.alu_result, self.store_data); 0 },
+            MemMode::SW => { self.write32(self.alu_result, self.store_data); 0},
+            MemMode::SWL => { self.write(self.alu_result & 0xfffffffc, self.store_data, (0x78 >> (self.alu_result & 3)) & 0xf); 0},
+            MemMode::SWR => { self.write(self.alu_result & 0xfffffffc, self.store_data, 0xf >> (self.alu_result & 3)); 0},
         };
 
         debug[3] = match self.mem_mode_2 {
             MemMode::NOP if self.dest_2 == 0 => format!(""), 
             MemMode::NOP => format!("              = {:08x}", self.alu_result),
             MemMode::SB | MemMode::SH | MemMode::SW | MemMode::SWL | MemMode::SWR
-              => format!("  {:08x} => [{:08x}]", self.store_data_2, self.alu_result & 0xfffffffc),
+              => format!("  {:08x} => [{:08x}]", self.store_data, self.alu_result & 0xfffffffc),
             _ => format!(" [{:08x}]", self.alu_result & 0xfffffffc),
         };
 
@@ -180,34 +175,51 @@ impl Cpu {
 
         // ALU Stage
         // ===============================================
+        let data_a = match self.input_a {
+            0 => 0,
+            1 ... 15 if self.input_a == self.dest_2 => self.alu_result, // Bypass network
+            1 ... 15 => self.regs[self.input_a as usize],
+            19 => self.temp_a,
+            20 => self.temp_b,
+            _ => unreachable!(),
+        };
+        let data_b = match self.input_b {
+            0 => 0,
+            1 ... 15 if self.input_b == self.dest_2 => self.alu_result, // Bypass network
+            1 ... 15 => self.regs[self.input_b as usize],
+            19 => self.temp_a,
+            20 => self.temp_b,
+            _ => unreachable!(),
+        };
+
         self.alu_result = match self.alu_mode {
-            ALU::ADD  => self.data_a + self.data_b, // TODO: trap on overflow
-            ALU::ADDU => self.data_a.wrapping_add(self.data_b),
-            ALU::SUB  => self.data_a - self.data_b, // TODO: trap on overflow
-            ALU::SUBU => self.data_a.wrapping_sub(self.data_b),
-            ALU::AND  => self.data_a & self.data_b,
-            ALU::OR   => self.data_a | self.data_b,
-            ALU::XOR  => self.data_a ^ self.data_b,
-            ALU::NOR  => !(self.data_a | self.data_b),
-            ALU::SLL  => self.data_a.wrapping_shl(self.data_b),
-            ALU::SRL  => self.data_a.wrapping_shr(self.data_b),
-            ALU::SRA  => (self.data_a as i32).wrapping_shr(self.data_b) as u32,
-            ALU::SLT  => ((self.data_a as i32) < (self.data_b as i32)) as u32,
-            ALU::SLTU => (self.data_a < self.data_b) as u32,
+            ALU::ADD  => data_a + data_b, // TODO: trap on overflow
+            ALU::ADDU => data_a.wrapping_add(data_b),
+            ALU::SUB  => data_a - data_b, // TODO: trap on overflow
+            ALU::SUBU => data_a.wrapping_sub(data_b),
+            ALU::AND  => data_a & data_b,
+            ALU::OR   => data_a | data_b,
+            ALU::XOR  => data_a ^ data_b,
+            ALU::NOR  => !(data_a | data_b),
+            ALU::SLL  => data_a.wrapping_shl(data_b & 0x1f),
+            ALU::SRL  => data_a.wrapping_shr(data_b & 0x1f),
+            ALU::SRA  => (data_a as i32).wrapping_shr(data_b & 0x1f) as u32,
+            ALU::SLT  => ((data_a as i32) < (data_b as i32)) as u32,
+            ALU::SLTU => (data_a < data_b) as u32,
         };
         self.dest_2 = self.dest;
 
         debug[2] = match self.alu_mode {
-            ALU::ADD | ALU::ADDU => format!(" {:x} + {:x} ", self.data_a, self.data_b),
-            ALU::SUB | ALU::SUBU => format!(" {:x} - {:x} ", self.data_a, self.data_b),
-            ALU::AND => format!(" {:x} & {:x} ", self.data_a, self.data_b),
-            ALU::OR  => format!(" {:x} | {:x} ", self.data_a, self.data_b),
-            ALU::XOR => format!(" {:x} ^ {:x} ", self.data_a, self.data_b),
-            ALU::NOR => format!(" ~({:x} | {:x})", self.data_a, self.data_b),
-            ALU::SLL => format!(" {:x} << {:}", self.data_a, self.data_b),
-            ALU::SRL => format!(" {:x} >> {:}", self.data_a, self.data_b),
-            ALU::SRA => format!(" {:x} >>> {:}", self.data_a, self.data_b),
-            ALU::SLT | ALU::SLTU => format!(" {:>8x} < {:>8x}", self.data_a, self.data_b),
+            ALU::ADD | ALU::ADDU => format!(" {:x} + {:x} ", data_a, data_b),
+            ALU::SUB | ALU::SUBU => format!(" {:x} - {:x} ", data_a, data_b),
+            ALU::AND => format!(" {:x} & {:x} ", data_a, data_b),
+            ALU::OR  => format!(" {:x} | {:x} ", data_a, data_b),
+            ALU::XOR => format!(" {:x} ^ {:x} ", data_a, data_b),
+            ALU::NOR => format!(" ~({:x} | {:x})", data_a, data_b),
+            ALU::SLL => format!(" {:x} << {:}", data_a, data_b),
+            ALU::SRL => format!(" {:x} >> {:}", data_a, data_b),
+            ALU::SRA => format!(" {:x} >>> {:}", data_a, data_b),
+            ALU::SLT | ALU::SLTU => format!(" {:>8x} < {:>8x}", data_a, data_b),
         };
 
         match self.mem_mode {  // Hide nop alu operations
@@ -226,7 +238,12 @@ impl Cpu {
             }
         }
 
-        self.store_data_2 = self.store_data;
+        self.store_data = match self.input_store {
+            0 => 0,
+            1 ... 15 if self.input_store == self.dest_2 => self.alu_result, // Bypass network
+            1 ... 15 => self.regs[self.input_store as usize],
+            _ => unreachable!(),
+        };
         self.mem_mode_2 = self.mem_mode;
         self.mem_mode = MemMode::NOP;
 
@@ -248,10 +265,10 @@ impl Cpu {
 
                 match subop {
                     0 | 2 | 3 | 4 | 6 | 7 => { // Shifts
-                        self.data_a = self.read_reg(rt);
-                        self.data_b = match subop & 0x4 {
-                            0 => imm5, // shift-imm
-                            4 => self.read_reg(rs) & 0x1f, // shift-reg
+                        self.input_a = rt;
+                        self.input_b = match subop & 0x4 {
+                            0 => { self.temp_a = imm5; 19 }, // shift-imm
+                            4 => rs, // shift-reg
                             _ => unreachable!()
                         };
                         self.alu_mode = match subop & 0x3 {
@@ -260,22 +277,22 @@ impl Cpu {
                             3 => ALU::SRA,
                             _ => unreachable!()
                         };
-                        self.dest = rd as usize;
+                        self.dest = rd;
                     },
                     0x8 | 0x9 => {
-                        self.data_a = self.read_reg(rs);
-                        self.data_b = 0;
+                        self.input_a = rs;
+                        self.input_b = 0;
                         self.alu_mode = ALU::OR;
                         self.do_branch = true;
                         if subop == 9 { // Calculate return address?
-                            self.dest = rd as usize;
+                            self.dest = rd;
                         } else {
                             self.dest = 0;
                         }
                     },
                     0x30 ... 0x38 | 0x3a | 0x3b => { // reg ALU ops
-                        self.data_a = self.read_reg(rs);
-                        self.data_b = self.read_reg(rt);
+                        self.input_a = rs;
+                        self.input_b = rt;
                         self.alu_mode = match subop & 0x7 {
                             0 => ALU::ADD,
                             1 => ALU::ADDU,
@@ -289,25 +306,30 @@ impl Cpu {
                             11 => ALU::SLTU,
                             _ => unreachable!()
                         };
-                        self.dest = rd as usize;
+                        self.dest = rd;
                     },
                     _ => { panic!("Unimplemented Opcode") }
                 };
             },
             0x1 => { // bltz/bgez
-                self.data_a = self.pc;
-                self.data_b = (imm16 as i16 as u32) << 2;
+                self.temp_a = self.pc;
+                self.temp_b = (imm16 as i16 as u32) << 2;
+                self.input_a = 19;
+                self.input_b = 20;
                 self.alu_mode = ALU::ADDU;
-                self.do_branch = match rt {
-                    0x0 => (self.read_reg(rs) as i32) < 0,
-                    0x1 => (self.read_reg(rs) as i32) >= 0,
-                    _ => { panic!("Unimplemented conditional call Opcode") }
-                };
+                unimplemented!();
+                //self.do_branch = match rt {
+                //    0x0 => (self.read_reg(rs) as i32) < 0,
+                //    0x1 => (self.read_reg(rs) as i32) >= 0,
+                //    _ => { panic!("Unimplemented conditional call Opcode") }
+                //};
                 self.dest = 0;
             },
             0x2 | 0x3 => {
-                self.data_a = imm26 << 2;
-                self.data_b = self.pc & 0xf0000000;
+                self.temp_a = self.pc & 0xfffffff0;
+                self.temp_b = imm26 << 2;
+                self.input_a = 19;
+                self.input_b = 20;
                 self.alu_mode = ALU::OR;
                 self.do_branch = true;
                 if opcode == 3 { // Calculate return address?
@@ -317,24 +339,29 @@ impl Cpu {
                 }
             },
             0x4 ... 0x7 => {
-                self.data_a = self.pc;
-                self.data_b = (imm16 as i16 as u32) << 2;
+                self.temp_a = self.pc;
+                self.temp_b = (imm16 as i16 as u32) << 2;
+                self.input_a = 19;
+                self.input_b = 20;
                 self.alu_mode = ALU::ADDU;
+                unimplemented!();
+                /* TODO: work out how to implement this.
                 self.do_branch = match opcode {
                     4 => self.read_reg(rs) == self.read_reg(rt),
                     5 => self.read_reg(rs) != self.read_reg(rt),
                     6 => self.read_reg(rs) as i32 <= 0,
                     7 => self.read_reg(rs) as i32 > 0,
                     _ => unreachable!(),
-                };
+                };*/
                 self.dest = 0;
             },
             0x8 ... 0xe => {
-                self.data_a = self.read_reg(rs);
-                self.data_b = if opcode > 0xb {
+                self.temp_a = if opcode > 0xb {
                     imm16 } else {
                     imm16 as i16 as u32
                 };
+                self.input_a = rs;
+                self.input_b = 19;
                 self.alu_mode = match opcode {
                     0x8 => ALU::ADD,
                     0x9 => ALU::ADDU,
@@ -345,16 +372,17 @@ impl Cpu {
                     0xe => ALU::XOR,
                     _ => unreachable!()
                 };
-                self.dest = rt as usize;
+                self.dest = rt;
             },
             0x20 ... 0x2f => {
-                self.data_a = self.read_reg(rs);
-                self.data_b = imm16;
+                self.temp_a = imm16;
+                self.input_a = rs;
+                self.input_b = 19;
                 self.alu_mode = ALU::ADDU;
                 if opcode & 0x8 == 0 { // Load              
-                    self.dest = rt as usize;
+                    self.dest = rt;
                 } else { // Store
-                    self.store_data = self.read_reg(rt);
+                    self.input_store = rt;
                     self.dest = 0;
                 }
                 self.mem_mode = match opcode {
@@ -374,10 +402,12 @@ impl Cpu {
                 };
             },
             0xf => { // load shifted immediate
-                self.data_a = imm16;
-                self.data_b = 16;
+                self.temp_a = imm16;
+                self.temp_b = 16;
+                self.input_a = 19;
+                self.input_b = 20;
                 self.alu_mode = ALU::SLL;
-                self.dest = rt as usize;
+                self.dest = rt;
             }
             _ => { panic!("Unimplemented Opcode") }
         }
@@ -413,16 +443,18 @@ impl Cpu {
             hi : 0,
             lo : 0,
             fetched_instruction : 0,
-            data_a : 0,
-            data_b : 0,
-            store_data : 0,
+            temp_a : 0,
+            temp_b : 0,
+            input_a : 0,
+            input_b : 0,
+            input_store : 0,
             dest : 0,
             do_branch : false,
             alu_mode: ALU::OR,
             mem_mode: MemMode::NOP,
             alu_result : 0,
             dest_2 : 0,
-            store_data_2 : 0,
+            store_data : 0,
             mem_result : 0,
             write_back_mask: 0xf,
             mem_mode_2 : MemMode::NOP,
