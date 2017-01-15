@@ -139,7 +139,7 @@ impl Cpu {
                     _ => unreachable!()
                 };
             }
-            debug[4] = format!("                 --> r{:}", self.dest_3);
+            debug[4] = format!("                  => r{:}", self.dest_3);
         }
 
 
@@ -171,8 +171,8 @@ impl Cpu {
             MemMode::NOP if self.dest_2 == 0 => format!(""), 
             MemMode::NOP => format!("              = {:08x}", self.alu_result),
             MemMode::SB | MemMode::SH | MemMode::SW | MemMode::SWL | MemMode::SWR
-              => format!(" Store {:08x}", self.alu_result & 0xfffffffc),
-            _ => format!(" Load  {:08x}", self.alu_result & 0xfffffffc),
+              => format!("  {:08x} => [{:08x}]", self.store_data_2, self.alu_result & 0xfffffffc),
+            _ => format!(" [{:08x}]", self.alu_result & 0xfffffffc),
         };
 
         self.dest_3 = self.dest_2;
@@ -241,7 +241,7 @@ impl Cpu {
         let imm16 = self.fetched_instruction & 0xffff;
         let imm26 = self.fetched_instruction & 0x3ffffff;
 
-        debug[1] = format!(" opcode: {:x}", self.fetched_instruction);
+        debug[1] = format!("     opcode: {:x}", self.fetched_instruction);
         match opcode {
             0x0 => {
                 let subop = self.fetched_instruction & 0x3f;
@@ -385,11 +385,11 @@ impl Cpu {
 
         // Instruction Fetch Stage
         // =============================================
-        debug[0] = format!(" fetch {:08x}", self.pc);
+        debug[0] = format!(" {:08x}:", self.pc);
         self.fetched_instruction = self.icache.read(self.pc); // TODO: takes 1 cycle to generate a result
         self.pc = self.pc + 4;
 
-        println!("{:25}|{:25}|{:25}|{:25}|{:25}", debug[(self.debug_rotate + 4) % 5 as usize], 
+        println!("{:25}|{:25}|{:25}|{:25}|{:25}", debug[(self.debug_rotate + 4) % 5],
                                                   debug[(self.debug_rotate + 3) % 5], 
                                                   debug[(self.debug_rotate + 2) % 5], 
                                                   debug[(self.debug_rotate + 1) % 5], 
