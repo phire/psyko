@@ -295,7 +295,7 @@ impl Cpu {
                             self.dest = 0;
                         }
                     },
-                    0x30 ... 0x38 | 0x3a | 0x3b => { // reg ALU ops
+                    0x20 ... 0x28 | 0x2a | 0x2b => { // reg ALU ops
                         self.input_a = rs;
                         self.input_b = rt;
                         self.alu_mode = match subop & 0x7 {
