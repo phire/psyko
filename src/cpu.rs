@@ -1,11 +1,16 @@
 
+use std::error::Error;
+use std::fs::File;
+use std::io::prelude::*;
+use std::path::Path;
+
 struct Icache {
 
 }
 
 impl Icache {
-    fn read(&self, address: u32) -> u32 {
-        return [0x3c080013, 0x3508243f, 0x3c011f80, 0xac281010, 0x00000000, 0x24080b88, 0x3c011f80, 0xac281060, 0, 0, 0, 0, 0, 0, 0xbf00054, 0][((address >> 2) & 15) as usize];
+    fn read(&self, address: u32, bios: &Bios) -> u32 {
+        return bios.read32(address);
     }
 }
 
@@ -108,7 +113,7 @@ impl Cpu {
     fn write(&self, addr:u32, data:u32, select:u8) {
     }
 
-    fn run_pipeline_cycle(&mut self) {
+    fn run_pipeline_cycle(&mut self, bios : &Bios) {
         // This function runs each of the 5 stages.
         // In hardware all the stages would be run in parallel, but in software
         // we run the stages sequenctally in reverse order.
@@ -416,7 +421,7 @@ impl Cpu {
         // Instruction Fetch Stage
         // =============================================
         debug[0] = format!(" {:08x}:", self.pc);
-        self.fetched_instruction = self.icache.read(self.pc); // TODO: takes 1 cycle to generate a result
+        self.fetched_instruction = self.icache.read(self.pc, bios); // TODO: takes 1 cycle to generate a result
         self.pc = self.pc + 4;
 
         println!("{:25}|{:25}|{:25}|{:25}|{:25}", debug[(self.debug_rotate + 4) % 5],
@@ -427,10 +432,10 @@ impl Cpu {
         self.debug_rotate = (self.debug_rotate + 1) % 5;
     }
 
-    pub fn run(&mut self, cycles : u32) -> u32 {
+    pub fn run(&mut self, cycles : u32, bios : &Bios) -> u32 {
         let mut count = cycles;
         while count > 0 {
-            self.run_pipeline_cycle();
+            self.run_pipeline_cycle(bios);
             count = count - 1;
         }
         return cycles;
@@ -466,7 +471,37 @@ impl Cpu {
 }
 
 struct Bios {
+    data: Vec<u8>,
+    mask: u32,
+}
 
+impl Bios {
+    fn new() -> Bios {
+        // Hardcoded path for now
+        let path = Path::new("Scph5502.bin");
+
+        let mut f = match File::open(&path) {
+            Err(e) => panic!("couldn't open {}: {}", path.display(), e.description()),
+            Ok(file) => file,
+        };
+        let mut buffer = vec![];
+
+        f.read_to_end(&mut buffer);
+
+        assert!((buffer.len() & (buffer.len() - 1)) == 0, "bios length isn't a power of 2");
+
+        return Bios {data: buffer.to_vec(), mask: (buffer.len() - 1) as u32};
+    }
+
+    fn read32(&self, address: u32) -> u32 {
+        let offset = (address & self.mask) as usize;
+
+        // Cause we can totally read 32bits in a single cycle
+        return (self.data[offset] as u32) |
+               (self.data[offset+1] as u32) << 8 |
+               (self.data[offset+2] as u32) << 16 |
+               (self.data[offset+3] as u32) << 24;
+    }
 }
 
 // CPU domain: CPU, RAM, BIOS, GPU DMA, 
@@ -477,10 +512,10 @@ pub struct CpuDomain {
 
 impl CpuDomain {
     pub fn new() -> CpuDomain {
-        CpuDomain {cpu : Cpu::new(), bios : Bios {}}
+        CpuDomain {cpu : Cpu::new(), bios : Bios::new()}
     }
 
     pub fn run(&mut self, cycles : u32) -> u32 {
-        return self.cpu.run(cycles);
+        return self.cpu.run(cycles, &self.bios);
     }
 }
